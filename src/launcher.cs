@@ -4,12 +4,9 @@ using System.IO;
 using System.Reflection;
 
 class ClaudeLauncher {
-    static string LogPath;
 
     static void Main() {
         var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        LogPath = Path.Combine(exeDir, "launcher_debug.log");
-        Log("START, exeDir=" + exeDir);
 
         var python = FindPython();
         var shell = FindShell("pwsh.exe")
@@ -18,19 +15,20 @@ class ClaudeLauncher {
                  ?? "powershell.exe";
         var hasWt = FindShell("wt.exe") != null;
 
-        Log("python=" + (python ?? "NULL"));
-        Log("shell=" + shell);
-        Log("hasWt=" + hasWt);
-
         if (python != null) {
-            var ok = TrustWithPython(python, exeDir);
-            Log("TrustWithPython result=" + ok);
+            TrustWithPython(python, exeDir);
         } else {
-            var ok = TrustWithPowerShell(shell, exeDir);
-            Log("TrustWithPowerShell result=" + ok);
+            TrustWithPowerShell(shell, exeDir);
         }
 
-        var shellArgs = "-NoExit -NoLogo -Command claude";
+        if (python != null) {
+            ConfigureBypass(python, exeDir);
+        } else {
+            ConfigureBypassPS(shell, exeDir);
+        }
+
+        var cmd = "claude --dangerously-skip-permissions";
+        var shellArgs = "-NoExit -NoLogo -Command \"" + cmd + "\"";
 
         if (hasWt) {
             Process.Start(new ProcessStartInfo {
@@ -49,12 +47,6 @@ class ClaudeLauncher {
         }
     }
 
-    static void Log(string msg) {
-        try {
-            File.AppendAllText(LogPath, DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + "\n");
-        } catch {}
-    }
-
     static string FindShell(string exeName) {
         var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
         foreach (var dir in pathEnv.Split(';')) {
@@ -65,15 +57,13 @@ class ClaudeLauncher {
     }
 
     static string FindPython() {
-        // First, try known real Python installations (skip Store stubs)
         var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
         foreach (var dir in pathEnv.Split(';')) {
             var d = dir.Trim();
-            if (d.Contains("WindowsApps")) continue;  // skip Microsoft Store stubs
+            if (d.Contains("WindowsApps")) continue;
             var full = Path.Combine(d, "python.exe");
             if (File.Exists(full)) return full;
         }
-        // Fallback: check common conda paths
         string[] known = {
             @"D:\Apps\miniconda3\python.exe",
             @"C:\ProgramData\miniconda3\python.exe",
@@ -85,7 +75,7 @@ class ClaudeLauncher {
         return null;
     }
 
-    static bool TrustWithPython(string python, string folder) {
+    static void TrustWithPython(string python, string folder) {
         try {
             var tmpDir = Path.GetTempPath();
             var tmpScript = Path.Combine(tmpDir, "claude_launcher_trust.py");
@@ -104,32 +94,23 @@ class ClaudeLauncher {
 
             File.WriteAllText(tmpScript, script);
 
-            var p1 = Process.Start(new ProcessStartInfo {
+            var p = Process.Start(new ProcessStartInfo {
                 FileName = python,
                 Arguments = "\"" + tmpScript + "\" \"" + folder + "\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true
             });
-            if (p1 == null) {
-                Log("Python process failed to start (null)");
-                return false;
-            }
-            var err = p1.StandardError.ReadToEnd();
-            p1.WaitForExit(5000);
-            Log("Python exit=" + p1.ExitCode + " err=" + (err.Length > 0 ? err : "(none)"));
+            if (p == null) return;
+            p.WaitForExit(5000);
 
             try { File.Delete(tmpScript); } catch {}
 
             System.Threading.Thread.Sleep(200);
-            return p1.ExitCode == 0;
-        } catch (Exception ex) {
-            Log("TrustWithPython EXCEPTION: " + ex.Message);
-            return false;
-        }
+        } catch {}
     }
 
-    static bool TrustWithPowerShell(string shell, string folder) {
+    static void TrustWithPowerShell(string shell, string folder) {
         try {
             var script =
                 "$cfgPath=Join-Path $env:USERPROFILE '.claude.json';" +
@@ -141,24 +122,72 @@ class ClaudeLauncher {
                 "$cfg.projects|Add-Member -Force -Name ([string]'" + folder.Replace('\\', '/') + "') -Value $entry;" +
                 "$cfg|ConvertTo-Json -Depth 100|Set-Content $cfgPath -Encoding UTF8 -NoNewline";
 
-            var p2 = Process.Start(new ProcessStartInfo {
+            var p = Process.Start(new ProcessStartInfo {
                 FileName = shell,
                 Arguments = "-NoProfile -Command \"" + script + "\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true
             });
-            if (p2 == null) {
-                Log("PS process failed to start (null)");
-                return false;
-            }
-            var err = p2.StandardError.ReadToEnd();
-            p2.WaitForExit(5000);
-            Log("PS exit=" + p2.ExitCode + " err=" + (err.Length > 0 ? err : "(none)"));
-            return p2.ExitCode == 0;
-        } catch (Exception ex) {
-            Log("TrustWithPowerShell EXCEPTION: " + ex.Message);
-            return false;
-        }
+            if (p == null) return;
+            p.WaitForExit(5000);
+        } catch {}
+    }
+
+    static void ConfigureBypass(string python, string folder) {
+        try {
+            var tmpScript = Path.Combine(Path.GetTempPath(), "claude_launcher_bypass.py");
+            var script =
+                "import json,os,sys\n" +
+                "d=os.path.join(sys.argv[1],'.claude')\n" +
+                "f=os.path.join(d,'settings.local.json')\n" +
+                "if not os.path.exists(d):os.makedirs(d)\n" +
+                "cfg={}\n" +
+                "if os.path.exists(f):\n" +
+                " try:cfg=json.load(open(f,encoding='utf-8'))\n" +
+                " except:cfg={}\n" +
+                "cfg['defaultMode']='bypassPermissions'\n" +
+                "g=open(f,'w',encoding='utf-8')\n" +
+                "json.dump(cfg,g,indent=2,ensure_ascii=False)\n" +
+                "g.flush()\nos.fsync(g.fileno())\ng.close()\n";
+
+            File.WriteAllText(tmpScript, script);
+
+            var p = Process.Start(new ProcessStartInfo {
+                FileName = python,
+                Arguments = "\"" + tmpScript + "\" \"" + folder + "\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true
+            });
+            if (p == null) return;
+            p.WaitForExit(5000);
+
+            try { File.Delete(tmpScript); } catch {}
+        } catch {}
+    }
+
+    static void ConfigureBypassPS(string shell, string folder) {
+        try {
+            var script =
+                "$dir=Join-Path ([string]'" + folder + "') '.claude';" +
+                "if(-not (Test-Path $dir)){New-Item -ItemType Directory -Path $dir|Out-Null};" +
+                "$path=Join-Path $dir 'settings.local.json';" +
+                "$cfg=@{};" +
+                "if(Test-Path $path){" +
+                " try{$cfg=(Get-Content $path -Raw -Encoding UTF8|ConvertFrom-Json)}catch{$cfg=@{}}};" +
+                "$cfg|Add-Member -Force -Name defaultMode -Value 'bypassPermissions';" +
+                "$cfg|ConvertTo-Json -Depth 10|Set-Content $path -Encoding UTF8 -NoNewline";
+
+            var p = Process.Start(new ProcessStartInfo {
+                FileName = shell,
+                Arguments = "-NoProfile -Command \"" + script + "\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true
+            });
+            if (p == null) return;
+            p.WaitForExit(5000);
+        } catch {}
     }
 }

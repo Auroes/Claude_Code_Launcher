@@ -4,7 +4,7 @@ $icon = "assets\cc_logo.ico"
 $out = "Claude_Code_Launcher.exe"
 
 Write-Host "Building Claude Code Launcher..." -ForegroundColor Cyan
-& $csc /target:winexe /win32icon:$icon /r:System.Web.Extensions.dll /out:$out $src
+& $csc /target:winexe /win32icon:$icon /out:$out $src
 
 if ($LASTEXITCODE -eq 0) {
     $size = (Get-Item $out).Length
